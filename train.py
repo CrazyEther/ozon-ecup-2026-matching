@@ -35,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--validation-fraction", type=float, default=0.1)
     parser.add_argument("--max-train-rows", type=int, default=0)
     parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--trust-remote-code", action="store_true",
                         help="Required by Alibaba GTE and safe only for a reviewed local checkpoint")
     return parser.parse_args()
@@ -135,13 +136,14 @@ def main() -> None:
     train_frame, valid_frame = split_per_category(frame, args.validation_fraction, args.seed)
     print(f"Training pairs: {len(train_frame):,}; validation pairs: {len(valid_frame):,}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    amp_dtype = torch.bfloat16 if device.type == "cuda" and torch.cuda.is_bf16_supported() else torch.float16
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_path, local_files_only=True, use_fast=True, trust_remote_code=args.trust_remote_code,
     )
     model = AutoModelForSequenceClassification.from_pretrained(
         args.model_path, local_files_only=True, trust_remote_code=args.trust_remote_code,
     ).to(device)
-    loader_args = dict(batch_size=args.batch_size, num_workers=4, pin_memory=device.type == "cuda",
+    loader_args = dict(batch_size=args.batch_size, num_workers=args.num_workers, pin_memory=device.type == "cuda",
                        collate_fn=collate(tokenizer, args.max_length))
     train_loader = DataLoader(PairDataset(train_frame), shuffle=True, **loader_args)
     valid_loader = DataLoader(PairDataset(valid_frame), shuffle=False, **loader_args)
@@ -160,7 +162,7 @@ def main() -> None:
             batch.pop("categories")
             batch = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
             optimizer.zero_grad(set_to_none=True)
-            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
+            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=device.type == "cuda"):
                 loss = soft_binary_loss(model(**batch).logits, targets)
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
