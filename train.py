@@ -95,6 +95,14 @@ def probabilities(logits: torch.Tensor) -> torch.Tensor:
     return torch.softmax(logits, dim=-1)[:, 1]
 
 
+def soft_binary_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    """Numerically safe binary loss for hard human and soft LLM labels."""
+    if logits.shape[-1] == 1:
+        return F.binary_cross_entropy_with_logits(logits[:, 0], targets)
+    log_probabilities = torch.log_softmax(logits, dim=-1)
+    return (-(targets * log_probabilities[:, 1] + (1 - targets) * log_probabilities[:, 0])).mean()
+
+
 def macro_pr_auc(model, loader, device) -> float:
     model.eval()
     scores, targets, categories = [], [], []
@@ -153,7 +161,7 @@ def main() -> None:
             batch = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
-                loss = F.binary_cross_entropy(probabilities(model(**batch).logits), targets)
+                loss = soft_binary_loss(model(**batch).logits, targets)
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
