@@ -8,4 +8,4 @@ tqdm>=4.66,<5
 scikit-learn>=1.4,<2
 sentencepiece>=0.2,<1
 rapidfuzz>=3.9,<4
-
+peft>=0.17,<1
