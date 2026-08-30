@@ -7,7 +7,9 @@ base checkpoint after the initial `prepare_model.py` step.
 from __future__ import annotations
 
 import argparse
+import json
 import random
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +38,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-train-rows", type=int, default=0)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--checkpoint-steps", type=int, default=500,
+                        help="Save a recoverable model checkpoint every N optimizer steps; 0 disables it")
+    parser.add_argument("--keep-checkpoints", type=int, default=2,
+                        help="Number of completed periodic checkpoints to retain")
+    parser.add_argument("--resume-from", default="",
+                        help="Path to a periodic checkpoint; resumes model weights and starts a fresh epoch")
     parser.add_argument("--trust-remote-code", action="store_true",
                         help="Required by Alibaba GTE and safe only for a reviewed local checkpoint")
     return parser.parse_args()
@@ -124,6 +132,34 @@ def macro_pr_auc(model, loader, device) -> float:
     return float(np.mean(values)) if values else float("nan")
 
 
+def save_periodic_checkpoint(
+    model, tokenizer, output: Path, global_step: int, epoch: int, step_in_epoch: int, keep: int,
+) -> Path:
+    """Save model weights for Colab disconnect recovery.
+
+    Optimizer state is deliberately not written: for a 300M-parameter model it
+    is several GB and makes frequent Drive checkpoints unreliable.  Resuming
+    loads these weights and starts a fresh epoch with a new optimizer.
+    """
+    checkpoint = output / f"checkpoint-step-{global_step:07d}"
+    checkpoint.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(checkpoint)
+    tokenizer.save_pretrained(checkpoint)
+    (checkpoint / "checkpoint.json").write_text(
+        json.dumps(
+            {"global_step": global_step, "epoch": epoch, "step_in_epoch": step_in_epoch}, indent=2
+        ),
+        encoding="utf-8",
+    )
+    # The marker is written last: folders left by a disconnect during a save
+    # are never treated as valid recovery checkpoints.
+    completed = sorted(path for path in output.glob("checkpoint-step-*") if (path / "checkpoint.json").exists())
+    for old_checkpoint in completed[:-max(1, keep)]:
+        shutil.rmtree(old_checkpoint)
+    print(f"Saved recovery checkpoint to {checkpoint}")
+    return checkpoint
+
+
 def main() -> None:
     args = parse_args()
     random.seed(args.seed)
@@ -140,8 +176,11 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_path, local_files_only=True, use_fast=True, trust_remote_code=args.trust_remote_code,
     )
+    model_source = args.resume_from or args.model_path
+    if args.resume_from:
+        print(f"Resuming model weights from {args.resume_from}; optimizer will start fresh.")
     model = AutoModelForSequenceClassification.from_pretrained(
-        args.model_path, local_files_only=True, trust_remote_code=args.trust_remote_code,
+        model_source, local_files_only=True, trust_remote_code=args.trust_remote_code,
     ).to(device)
     loader_args = dict(batch_size=args.batch_size, num_workers=args.num_workers, pin_memory=device.type == "cuda",
                        collate_fn=collate(tokenizer, args.max_length))
@@ -153,11 +192,13 @@ def main() -> None:
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
     best_score = -float("inf")
     output = Path(args.output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    global_step = 0
 
     for epoch in range(1, args.epochs + 1):
         model.train()
         progress = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}")
-        for batch in progress:
+        for step_in_epoch, batch in enumerate(progress, start=1):
             targets = batch.pop("targets").to(device)
             batch.pop("categories")
             batch = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
@@ -170,12 +211,16 @@ def main() -> None:
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()
+            global_step += 1
             progress.set_postfix(loss=f"{loss.item():.4f}")
+            if args.checkpoint_steps and global_step % args.checkpoint_steps == 0:
+                save_periodic_checkpoint(
+                    model, tokenizer, output, global_step, epoch, step_in_epoch, args.keep_checkpoints,
+                )
         score = macro_pr_auc(model, valid_loader, device)
         print(f"Epoch {epoch}: validation macro PR-AUC = {score:.6f}")
         if score > best_score:
             best_score = score
-            output.mkdir(parents=True, exist_ok=True)
             model.save_pretrained(output)
             tokenizer.save_pretrained(output)
             (output / "training_metrics.txt").write_text(f"best_macro_pr_auc={score:.8f}\n", encoding="utf-8")
