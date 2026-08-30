@@ -48,6 +48,7 @@ def _logits_to_scores(logits: torch.Tensor) -> torch.Tensor:
 def predict_to_csv(
     *, items_path: str | Path, matches_path: str | Path, output_path: str | Path,
     model_path: str | Path, batch_size: int, max_length: int, trust_remote_code: bool = False,
+    adapter_path: str | Path | None = None,
 ) -> None:
     pairs = _load_pairs(items_path, matches_path)
     result = pairs.loc[:, ["id1", "id2"]].copy()
@@ -61,10 +62,15 @@ def predict_to_csv(
     tokenizer = AutoTokenizer.from_pretrained(
         model_path, local_files_only=True, use_fast=True, trust_remote_code=trust_remote_code,
     )
+    amp_dtype = torch.bfloat16 if device.type == "cuda" and torch.cuda.is_bf16_supported() else torch.float16
     model = AutoModelForSequenceClassification.from_pretrained(
         model_path, local_files_only=True, trust_remote_code=trust_remote_code,
-        torch_dtype=torch.bfloat16 if device.type == "cuda" else None,
-    ).to(device).eval()
+        torch_dtype=amp_dtype if device.type == "cuda" else None,
+    )
+    if adapter_path:
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, adapter_path, local_files_only=True)
+    model = model.to(device).eval()
 
     valid_rows = np.flatnonzero(valid.to_numpy())
     with torch.inference_mode():
@@ -77,7 +83,7 @@ def predict_to_csv(
             )
             encoded = {key: value.to(device, non_blocking=True) for key, value in encoded.items()}
             if device.type == "cuda":
-                with torch.autocast("cuda", dtype=torch.bfloat16):
+                with torch.autocast("cuda", dtype=amp_dtype):
                     batch_scores = _logits_to_scores(model(**encoded).logits)
             else:
                 batch_scores = _logits_to_scores(model(**encoded).logits)
