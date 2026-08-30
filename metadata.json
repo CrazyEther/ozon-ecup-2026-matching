@@ -1,4 +1,5 @@
 {
   "image": "kityara1pavel/ozon-matching-runtime:1.0",
-  "entry_point": "python -u run.py --trust-remote-code --max-length 128 --batch-size 384"
+  "entry_point": "python -u run.py --max-length 128 --batch-size 384"
 }
+
