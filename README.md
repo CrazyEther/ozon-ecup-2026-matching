@@ -11,6 +11,7 @@ competition.
 - `src/inference.py` — memory-conscious batched inference and CSV validation.
 - `train.py` — fine-tunes a Hugging Face sequence-classification checkpoint on
   human labels, optionally followed by LLM-labelled pairs.
+- `train_lora.py` — memory-efficient LoRA training with automatic multi-GPU DDP.
 - `prepare_model.py` — downloads the initial model once during development so it
   can be included in the submission archive.
 
@@ -37,6 +38,31 @@ For a second training stage with soft LLM labels, pass `matches_llm.parquet` as
 `--max-train-rows` is useful to establish a fast, reproducible experiment
 before training on all data.
 
+### LoRA on one or more GPUs
+
+`train_lora.py` automatically detects all visible CUDA GPUs. With two Kaggle
+T4s, the usual `python train_lora.py ...` command relaunches two DDP workers;
+no explicit `torchrun` command is required. `--batch-size` is the batch size
+per GPU, so `--batch-size 64` on two GPUs gives an effective global batch of
+128. Pass `--single-gpu` only when automatic multi-GPU execution must be
+disabled.
+
+```bash
+python train_lora.py \
+  --items-path /kaggle/working/data/items_human.parquet \
+  --matches-path /kaggle/working/data/matches.parquet \
+  --model-path /kaggle/working/models/gte \
+  --trust-remote-code \
+  --output-dir /kaggle/working/gte-lora-r16 \
+  --epochs 1 --batch-size 64 --max-length 128 \
+  --learning-rate 2e-4 --lora-rank 16 --lora-alpha 32 \
+  --checkpoint-steps 250 --keep-checkpoints 2
+```
+
+Only rank zero writes checkpoints and the best adapter. Validation is sharded
+without padding, then gathered before macro PR-AUC is calculated, so multi-GPU
+validation does not duplicate rows.
+
 ## Test the competition interface
 
 ```bash
@@ -54,4 +80,3 @@ Before submitting, ensure `models/product-matcher` is present and run the smoke
 test above in an offline container. `Dockerfile` builds a self-contained image;
 after pushing it to Docker Hub, replace the `image` value in `metadata.json`
 with its immutable image tag.
-
