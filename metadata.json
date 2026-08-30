@@ -1,4 +1,4 @@
 {
-  "image": "odsai/ecup26-matching-baseline:1.0",
+  "image": "kityara1pavel/ozon-matching-runtime:1.0",
   "entry_point": "python -u run.py --trust-remote-code --max-length 128 --batch-size 384"
 }
