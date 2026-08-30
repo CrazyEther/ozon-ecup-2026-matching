@@ -66,7 +66,7 @@ def _load_sequence_classifier(model_path, trust_remote_code, torch_dtype):
     config_path = Path(model_path) / "config.json"
     config_data = json.loads(config_path.read_text(encoding="utf-8"))
     auto_map = config_data.get("auto_map", {})
-    if trust_remote_code and (Path(model_path) / "modeling.py").is_file() and auto_map:
+    if (Path(model_path) / "modeling.py").is_file() and auto_map:
         config_class = _bundled_class(model_path, "AutoConfig")
         model_class = _bundled_class(model_path, "AutoModelForSequenceClassification")
         config = config_class.from_pretrained(model_path, local_files_only=True)
