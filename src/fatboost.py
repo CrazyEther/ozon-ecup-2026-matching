@@ -506,7 +506,8 @@ class FatBoostFeatureBuilder:
             first = cards[left_index] if left_index >= 0 else missing_card
             second = cards[right_index] if right_index >= 0 else missing_card
             base[row_index] = numeric_features(first, second)
-            pair_text.append(_pair_text_fields(first, second))
+            if self.native_text:
+                pair_text.append(_pair_text_fields(first, second))
 
         texts = [card.all_text or EMPTY_TEXT for card in cards]
         names = [card.name or EMPTY_TEXT for card in cards]

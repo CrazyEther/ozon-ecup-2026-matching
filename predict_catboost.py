@@ -44,6 +44,12 @@ def main() -> None:
 
     items = pd.read_parquet(args.items_path, columns=["id", "name", "attributes", "category"])
     matches = pd.read_parquet(args.matches_path, columns=["id1", "id2"])
+    involved_ids = pd.unique(pd.concat([matches.id1, matches.id2], ignore_index=True))
+    items = items.loc[items.id.isin(involved_ids)].reset_index(drop=True)
+    missing_items = len(involved_ids) - items.id.nunique()
+    if missing_items:
+        raise ValueError(f"items parquet is missing {missing_items} product ids used by matches")
+    print(f"Using {len(items):,} referenced products for {len(matches):,} pairs", flush=True)
     features = builder.transform(items, matches, encoder=encoder)
     pool = Pool(
         features,
