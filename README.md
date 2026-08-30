@@ -80,3 +80,4 @@ Before submitting, ensure `models/product-matcher` is present and run the smoke
 test above in an offline container. `Dockerfile` builds a self-contained image;
 after pushing it to Docker Hub, replace the `image` value in `metadata.json`
 with its immutable image tag.
+
