@@ -1,0 +1,19 @@
+FROM odsai/ecup26-matching-baseline:1.0
+
+# Keep the CUDA-enabled PyTorch supplied by the competition image.  Only pin
+# the Transformers stack verified with the bundled GTE implementation.
+RUN python -m pip install --no-cache-dir --upgrade \
+    transformers==4.57.6 \
+    huggingface-hub==0.36.2 \
+    tokenizers==0.22.2 \
+    safetensors==0.8.0
+
+ENV TRANSFORMERS_OFFLINE=1 \
+    HF_HUB_OFFLINE=1 \
+    TOKENIZERS_PARALLELISM=true \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /workspace
+
+
