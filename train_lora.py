@@ -1,7 +1,7 @@
-"""LoRA smoke training for the GTE cross-encoder.
+"""LoRA training for the GTE cross-encoder.
 
-This is deliberately separate from ``train.py``: it saves a PEFT adapter, not
-a replacement full model, and does not change the regular fine-tuning path.
+The resulting artifact is a small PEFT adapter; it must be used together with
+the local base GTE checkpoint during inference.
 """
 from __future__ import annotations
 
@@ -12,12 +12,15 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from peft import LoraConfig, TaskType, get_peft_model
+from peft import LoraConfig, PeftModel, TaskType, get_peft_model
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, get_cosine_schedule_with_warmup
 
-from train import PairDataset, collate, macro_pr_auc, make_pairs, soft_binary_loss, split_per_category
+from train import (
+    PairDataset, collate, macro_pr_auc, make_pairs, save_periodic_checkpoint,
+    soft_binary_loss, split_per_category,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,6 +40,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-train-rows", type=int, default=0)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--checkpoint-steps", type=int, default=500,
+                        help="Save a recoverable LoRA adapter every N optimizer steps; 0 disables it")
+    parser.add_argument("--keep-checkpoints", type=int, default=2)
+    parser.add_argument("--resume-from", default="",
+                        help="Path to a LoRA adapter checkpoint; optimizer starts fresh")
     parser.add_argument("--trust-remote-code", action="store_true")
     return parser.parse_args()
 
@@ -69,17 +77,21 @@ def main() -> None:
     base_model = AutoModelForSequenceClassification.from_pretrained(
         args.model_path, local_files_only=True, trust_remote_code=args.trust_remote_code,
     ).to(device)
-    heads = classifier_modules(base_model)
-    lora_config = LoraConfig(
-        task_type=TaskType.SEQ_CLS,
-        inference_mode=False,
-        r=args.lora_rank,
-        lora_alpha=args.lora_alpha,
-        lora_dropout=args.lora_dropout,
-        target_modules="all-linear",
-        modules_to_save=heads or None,
-    )
-    model = get_peft_model(base_model, lora_config)
+    if args.resume_from:
+        print(f"Resuming LoRA adapter from {args.resume_from}; optimizer will start fresh.")
+        model = PeftModel.from_pretrained(base_model, args.resume_from, is_trainable=True, local_files_only=True)
+    else:
+        heads = classifier_modules(base_model)
+        lora_config = LoraConfig(
+            task_type=TaskType.SEQ_CLS,
+            inference_mode=False,
+            r=args.lora_rank,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            target_modules="all-linear",
+            modules_to_save=heads or None,
+        )
+        model = get_peft_model(base_model, lora_config)
     model.print_trainable_parameters()
 
     loader_args = dict(
@@ -100,11 +112,13 @@ def main() -> None:
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
     best_score = -float("inf")
     output = Path(args.output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    global_step = 0
 
     for epoch in range(1, args.epochs + 1):
         model.train()
         progress = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}")
-        for batch in progress:
+        for step_in_epoch, batch in enumerate(progress, start=1):
             targets = batch.pop("targets").to(device)
             batch.pop("categories")
             batch = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
@@ -117,12 +131,16 @@ def main() -> None:
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()
+            global_step += 1
             progress.set_postfix(loss=f"{loss.item():.4f}")
+            if args.checkpoint_steps and global_step % args.checkpoint_steps == 0:
+                save_periodic_checkpoint(
+                    model, tokenizer, output, global_step, epoch, step_in_epoch, args.keep_checkpoints,
+                )
         score = macro_pr_auc(model, valid_loader, device)
         print(f"Epoch {epoch}: validation macro PR-AUC = {score:.6f}")
         if score > best_score:
             best_score = score
-            output.mkdir(parents=True, exist_ok=True)
             model.save_pretrained(output)
             tokenizer.save_pretrained(output)
             (output / "experiment.json").write_text(
