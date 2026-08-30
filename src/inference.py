@@ -1,17 +1,18 @@
 """Fast, offline, order-preserving inference for candidate product pairs."""
 from __future__ import annotations
 
+import importlib.util
+import json
 import os
+import sys
+import types
 from pathlib import Path
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
-# Competition workers mount the solution and /root read-only.  Transformers
-# still needs a writable location to materialize bundled trust_remote_code.
-os.environ["HF_HOME"] = "/tmp/huggingface"
-os.environ["HF_MODULES_CACHE"] = "/tmp/huggingface/modules"
-os.environ["TRANSFORMERS_CACHE"] = "/tmp/huggingface/transformers"
+os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
+sys.dont_write_bytecode = True
 
 import numpy as np
 import pandas as pd
@@ -20,6 +21,62 @@ from tqdm.auto import tqdm
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from .text import add_product_text
+
+
+def _bundled_class(model_path: str | Path, auto_map_key: str):
+    """Import bundled custom model code without Transformers' writable cache.
+
+    The competition runtime exposes a read-only root filesystem, including the
+    usual Hugging Face cache locations.  Loading the vendored Python module as
+    a regular in-memory package avoids all dynamic-module cache writes.
+    """
+    model_dir = Path(model_path).resolve()
+    config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
+    reference = config.get("auto_map", {}).get(auto_map_key)
+    if not isinstance(reference, str):
+        raise ValueError(f"config.json has no string auto_map entry for {auto_map_key}")
+    reference = reference.split("--", 1)[-1]
+    module_name, class_name = reference.rsplit(".", 1)
+    source = model_dir.joinpath(*module_name.split(".")).with_suffix(".py")
+    if not source.is_file():
+        raise FileNotFoundError(f"Bundled model module is missing: {source}")
+
+    package_name = "_ozon_bundled_gte"
+    if package_name not in sys.modules:
+        package = types.ModuleType(package_name)
+        package.__file__ = str(model_dir / "__init__.py")
+        package.__package__ = package_name
+        package.__path__ = [str(model_dir)]
+        package.__spec__ = importlib.util.spec_from_loader(package_name, loader=None, is_package=True)
+        sys.modules[package_name] = package
+
+    qualified_name = f"{package_name}.{module_name}"
+    module = sys.modules.get(qualified_name)
+    if module is None:
+        spec = importlib.util.spec_from_file_location(qualified_name, source)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Cannot load bundled model module from {source}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[qualified_name] = module
+        spec.loader.exec_module(module)
+    return getattr(module, class_name)
+
+
+def _load_sequence_classifier(model_path, trust_remote_code, torch_dtype):
+    config_path = Path(model_path) / "config.json"
+    config_data = json.loads(config_path.read_text(encoding="utf-8"))
+    auto_map = config_data.get("auto_map", {})
+    if trust_remote_code and (Path(model_path) / "modeling.py").is_file() and auto_map:
+        config_class = _bundled_class(model_path, "AutoConfig")
+        model_class = _bundled_class(model_path, "AutoModelForSequenceClassification")
+        config = config_class.from_pretrained(model_path, local_files_only=True)
+        return model_class.from_pretrained(
+            model_path, config=config, local_files_only=True, torch_dtype=torch_dtype,
+        )
+    return AutoModelForSequenceClassification.from_pretrained(
+        model_path, local_files_only=True, trust_remote_code=trust_remote_code,
+        torch_dtype=torch_dtype,
+    )
 
 
 def _load_pairs(items_path: str | Path, matches_path: str | Path) -> pd.DataFrame:
@@ -68,9 +125,8 @@ def predict_to_csv(
         model_path, local_files_only=True, use_fast=True, trust_remote_code=trust_remote_code,
     )
     amp_dtype = torch.bfloat16 if device.type == "cuda" and torch.cuda.is_bf16_supported() else torch.float16
-    model = AutoModelForSequenceClassification.from_pretrained(
-        model_path, local_files_only=True, trust_remote_code=trust_remote_code,
-        torch_dtype=amp_dtype if device.type == "cuda" else None,
+    model = _load_sequence_classifier(
+        model_path, trust_remote_code, amp_dtype if device.type == "cuda" else None,
     )
     if adapter_path:
         from peft import PeftModel
