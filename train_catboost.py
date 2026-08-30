@@ -131,6 +131,16 @@ def main() -> None:
     if matches.target.isna().any() or not matches.target.between(0, 1).all():
         raise ValueError("target must be in [0, 1]")
 
+    # A smoke run must not parse/vectorize every row of items_human. Keep only
+    # products referenced by the sampled pairs; the competition inference input
+    # follows the same contract and contains only participating products.
+    involved_ids = pd.unique(pd.concat([matches.id1, matches.id2], ignore_index=True))
+    items = items.loc[items.id.isin(involved_ids)].reset_index(drop=True)
+    missing_items = len(involved_ids) - items.id.nunique()
+    if missing_items:
+        raise ValueError(f"items parquet is missing {missing_items} product ids used by matches")
+    print(f"Using {len(items):,} referenced products for {len(matches):,} pairs", flush=True)
+
     item_categories = items.set_index("id").category
     frame = matches.copy()
     frame["category"] = frame.id1.map(item_categories).fillna("__missing__").astype(str)
