@@ -174,13 +174,18 @@ def main() -> None:
 
     frame = make_pairs(args.items_path, args.matches_path, args.max_train_rows, args.seed)
     train_frame, valid_frame = split_per_category(frame, args.validation_fraction, args.seed)
+    if distributed and args.batch_size % world_size:
+        raise ValueError(
+            f"--batch-size ({args.batch_size}) must be divisible by GPU count ({world_size})"
+        )
     if is_main:
         print(f"Training pairs: {len(train_frame):,}; validation pairs: {len(valid_frame):,}")
         if distributed:
             print(
-                f"DDP enabled on {world_size} GPUs; effective global batch size: "
-                f"{args.batch_size * world_size:,}",
+                f"DDP enabled on {world_size} GPUs; global batch size: {args.batch_size:,}; "
+                f"per-GPU batch size: {args.batch_size // world_size:,}",
             )
+    per_device_batch_size = args.batch_size // world_size if distributed else args.batch_size
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
     amp_dtype = torch.bfloat16 if device.type == "cuda" and torch.cuda.is_bf16_supported() else torch.float16
     tokenizer = AutoTokenizer.from_pretrained(
@@ -208,7 +213,7 @@ def main() -> None:
         model.print_trainable_parameters()
 
     loader_args = dict(
-        batch_size=args.batch_size,
+        batch_size=per_device_batch_size,
         num_workers=args.num_workers,
         pin_memory=device.type == "cuda",
         collate_fn=collate(tokenizer, args.max_length),

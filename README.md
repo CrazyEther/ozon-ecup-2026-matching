@@ -42,10 +42,10 @@ before training on all data.
 
 `train_lora.py` automatically detects all visible CUDA GPUs. With two Kaggle
 T4s, the usual `python train_lora.py ...` command relaunches two DDP workers;
-no explicit `torchrun` command is required. `--batch-size` is the batch size
-per GPU, so `--batch-size 64` on two GPUs gives an effective global batch of
-128. Pass `--single-gpu` only when automatic multi-GPU execution must be
-disabled.
+no explicit `torchrun` command is required. `--batch-size` remains the global
+batch size: `--batch-size 64` on two GPUs assigns 32 examples to each GPU.
+The value must be divisible by the GPU count. Pass `--single-gpu` only when
+automatic multi-GPU execution must be disabled.
 
 ```bash
 python train_lora.py \
