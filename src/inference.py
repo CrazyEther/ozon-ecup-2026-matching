@@ -7,6 +7,11 @@ from pathlib import Path
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
+# Competition workers mount the solution and /root read-only.  Transformers
+# still needs a writable location to materialize bundled trust_remote_code.
+os.environ.setdefault("HF_HOME", "/tmp/huggingface")
+os.environ.setdefault("HF_MODULES_CACHE", "/tmp/huggingface/modules")
+os.environ.setdefault("TRANSFORMERS_CACHE", "/tmp/huggingface/transformers")
 
 import numpy as np
 import pandas as pd
