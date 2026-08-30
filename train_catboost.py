@@ -105,6 +105,16 @@ def main() -> None:
     parser.add_argument("--bagging-temperature", type=float, default=0.5)
     parser.add_argument("--early-stopping-rounds", type=int, default=180)
     parser.add_argument("--thread-count", type=int, default=-1)
+    parser.add_argument("--task-type", choices=["CPU", "GPU"], default="CPU")
+    parser.add_argument(
+        "--devices", default=None,
+        help="CatBoost GPU ids, for example 0 or 0:1. Omit to use every visible GPU.",
+    )
+    parser.add_argument(
+        "--snapshot-file", default=None,
+        help="Optional CatBoost recovery snapshot path for interrupted training.",
+    )
+    parser.add_argument("--snapshot-interval", type=int, default=300)
     parser.add_argument("--word-max-features", type=int, default=120_000)
     parser.add_argument("--char-max-features", type=int, default=160_000)
     parser.add_argument("--tfidf-min-df", type=int, default=2)
@@ -181,6 +191,8 @@ def main() -> None:
     )
     features = builder.fit_transform(items, frame, encoder=encoder)
     ranking = args.mode == "ranker"
+    if ranking and args.task_type == "GPU":
+        raise ValueError("YetiRank:mode=MAP is CPU-only; use a classifier mode for GPU training")
     train_weights = balanced_weights(frame, train_index) if args.mode == "weighted-classifier" else None
     valid_weights = balanced_weights(frame, validation_index) if args.mode == "weighted-classifier" else None
     train_pool, _ = make_pool(features, frame, train_index, builder, ranking, train_weights)
@@ -197,10 +209,13 @@ def main() -> None:
         bagging_temperature=args.bagging_temperature,
         random_seed=args.seed,
         thread_count=args.thread_count,
-        task_type="CPU",  # YetiRank MAP and native text are CPU-oriented.
-        allow_writing_files=False,
+        task_type=args.task_type,
+        # CatBoost disables snapshots when file writing is forbidden.
+        allow_writing_files=bool(args.snapshot_file),
         verbose=50,
     )
+    if args.task_type == "GPU" and args.devices:
+        common["devices"] = args.devices
     if ranking:
         model: CatBoostClassifier | CatBoostRanker = CatBoostRanker(
             loss_function="YetiRank:mode=MAP",
@@ -213,11 +228,21 @@ def main() -> None:
             eval_metric="PRAUC:type=Classic",
             **common,
         )
+    fit_options: dict[str, object] = {}
+    if args.snapshot_file:
+        snapshot_path = Path(args.snapshot_file)
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        fit_options.update(
+            save_snapshot=True,
+            snapshot_file=str(snapshot_path),
+            snapshot_interval=args.snapshot_interval,
+        )
     model.fit(
         train_pool,
         eval_set=valid_pool,
         early_stopping_rounds=args.early_stopping_rounds,
         use_best_model=True,
+        **fit_options,
     )
     if ranking:
         valid_scores = sigmoid(np.asarray(model.predict(valid_pool)))
@@ -244,6 +269,7 @@ def main() -> None:
         "text_features": builder.text_feature_names,
         "embedding_model": builder.embedding_model,
         "embedding_pooling": builder.embedding_pooling,
+        "task_type": args.task_type,
         "model_file": output.name,
         "feature_builder_file": builder_output.name,
         "seed": args.seed,
