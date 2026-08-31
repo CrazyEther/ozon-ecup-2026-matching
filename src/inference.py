@@ -107,11 +107,11 @@ def _logits_to_scores(logits: torch.Tensor) -> torch.Tensor:
     return torch.softmax(logits, dim=-1)[:, 1]
 
 
-def predict_to_csv(
-    *, items_path: str | Path, matches_path: str | Path, output_path: str | Path,
+def predict_scores(
+    *, items_path: str | Path, matches_path: str | Path,
     model_path: str | Path, batch_size: int, max_length: int, trust_remote_code: bool = False,
     adapter_path: str | Path | None = None,
-) -> None:
+) -> pd.DataFrame:
     pairs = _load_pairs(items_path, matches_path)
     result = pairs.loc[:, ["id1", "id2"]].copy()
     scores = np.zeros(len(pairs), dtype=np.float32)
@@ -153,7 +153,23 @@ def predict_to_csv(
     result["predict"] = scores
     if len(result) != len(pairs) or result[["id1", "id2"]].isna().any().any():
         raise RuntimeError("Output validation failed: pair IDs were not preserved")
+    return result
+
+
+def predict_to_csv(
+    *, items_path: str | Path, matches_path: str | Path, output_path: str | Path,
+    model_path: str | Path, batch_size: int, max_length: int, trust_remote_code: bool = False,
+    adapter_path: str | Path | None = None,
+) -> None:
+    result = predict_scores(
+        items_path=items_path,
+        matches_path=matches_path,
+        model_path=model_path,
+        batch_size=batch_size,
+        max_length=max_length,
+        trust_remote_code=trust_remote_code,
+        adapter_path=adapter_path,
+    )
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     result.to_csv(output_path, index=False)
     print(f"Saved {len(result):,} predictions to {output_path}")
-

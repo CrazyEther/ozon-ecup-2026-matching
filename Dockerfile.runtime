@@ -6,7 +6,11 @@ RUN python -m pip install --break-system-packages --no-cache-dir --upgrade \
     transformers==4.57.6 \
     huggingface-hub==0.36.2 \
     tokenizers==0.22.2 \
-    safetensors==0.8.0
+    safetensors==0.8.0 \
+    catboost==1.2.8 \
+    joblib==1.5.2 \
+    rapidfuzz==3.14.1 \
+    scikit-learn==1.7.2
 
 ENV TRANSFORMERS_OFFLINE=1 \
     HF_HUB_OFFLINE=1 \
@@ -15,4 +19,3 @@ ENV TRANSFORMERS_OFFLINE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /workspace
-
